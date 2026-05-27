@@ -178,6 +178,26 @@
       display: none;
     }
     .error-msg.active { display: block; }
+
+    .btn-create-all {
+      padding: 0.55rem 1.25rem;
+      background: var(--orange);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: none;
+    }
+    .btn-create-all.active { display: inline-block; }
+    .btn-create-all:hover { opacity: 0.85; }
+    .btn-create-all:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-create-all.done {
+      background: var(--green);
+      cursor: default;
+    }
   </style>
 </head>
 <body>
@@ -202,7 +222,10 @@
   <div id="results">
     <div class="results-header">
       <h2>Findings</h2>
-      <span class="results-count" id="resultsCount"></span>
+      <div style="display:flex;align-items:center;gap:1rem;">
+        <button class="btn-create-all" id="createAllBtn" onclick="createAllIssues()">Create All Issues</button>
+        <span class="results-count" id="resultsCount"></span>
+      </div>
     </div>
     <div id="issueCards"></div>
   </div>
@@ -283,6 +306,17 @@
 
       results.classList.add('active');
       window._findings = findings;
+      window._repo = repo;
+
+      const createAllBtn = document.getElementById('createAllBtn');
+      if (findings.length > 0) {
+        createAllBtn.classList.add('active');
+        createAllBtn.classList.remove('done');
+        createAllBtn.disabled = false;
+        createAllBtn.textContent = `Create All ${findings.length} Issues`;
+      } else {
+        createAllBtn.classList.remove('active');
+      }
     }
 
     async function createIssue(idx, repo) {
@@ -309,6 +343,56 @@
         btn.textContent = 'Failed - retry';
         btn.disabled = false;
         alert(err.message);
+      }
+    }
+
+    async function createAllIssues() {
+      const btn = document.getElementById('createAllBtn');
+      const repo = window._repo;
+      const findings = window._findings;
+      if (!findings || !repo) return;
+
+      btn.disabled = true;
+      let created = 0;
+      let failed = 0;
+
+      for (let idx = 0; idx < findings.length; idx++) {
+        const fixBtn = document.getElementById(`fix-btn-${idx}`);
+        if (fixBtn.classList.contains('created')) {
+          created++;
+          continue;
+        }
+
+        btn.textContent = `Creating ${created + failed + 1} of ${findings.length}...`;
+        fixBtn.disabled = true;
+        fixBtn.textContent = 'Creating...';
+
+        try {
+          const resp = await fetch('/audit/create-issue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo, finding: findings[idx] })
+          });
+          const data = await resp.json();
+
+          if (!resp.ok) throw new Error(data.error || 'Failed');
+
+          fixBtn.textContent = `Issue #${data.issue_number} created`;
+          fixBtn.classList.add('created');
+          created++;
+        } catch (err) {
+          fixBtn.textContent = 'Failed - retry';
+          fixBtn.disabled = false;
+          failed++;
+        }
+      }
+
+      if (failed === 0) {
+        btn.textContent = `All ${created} issues created`;
+        btn.classList.add('done');
+      } else {
+        btn.textContent = `${created} created, ${failed} failed`;
+        btn.disabled = false;
       }
     }
 
