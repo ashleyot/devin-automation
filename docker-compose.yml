@@ -1,0 +1,10 @@
+services:
+  devin-automation:
+    build: .
+    ports:
+      - "5050:5050"
+    env_file:
+      - .env
+    volumes:
+      - ./sessions.json:/app/sessions.json
+    restart: unless-stopped
