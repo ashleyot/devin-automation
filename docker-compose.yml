@@ -6,5 +6,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./sessions.json:/app/sessions.json
+      - sessions-data:/app/data
     restart: unless-stopped
+
+volumes:
+  sessions-data:

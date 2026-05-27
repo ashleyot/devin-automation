@@ -31,7 +31,9 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))
 
 DEVIN_API_BASE = "https://api.devin.ai/v1"
-SESSIONS_FILE = Path(__file__).parent / "sessions.json"
+DATA_DIR = Path(os.getenv("DATA_DIR", str(Path(__file__).parent)))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_FILE = DATA_DIR / "sessions.json"
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +44,7 @@ _lock = threading.Lock()
 
 
 def _load_sessions() -> list[dict]:
-    if SESSIONS_FILE.exists():
+    if SESSIONS_FILE.exists() and SESSIONS_FILE.is_file():
         with open(SESSIONS_FILE, "r") as fh:
             return json.load(fh)
     return []
