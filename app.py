@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Flask, abort, jsonify, redirect, render_template, request
 
 load_dotenv()
 
@@ -298,6 +298,13 @@ def dashboard():
         failed=failed,
         success_rate=success_rate,
     )
+
+
+@app.route("/dashboard/clear", methods=["POST"])
+def dashboard_clear():
+    with _lock:
+        _save_sessions([])
+    return redirect("/dashboard")
 
 
 # ---------------------------------------------------------------------------
