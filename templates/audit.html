@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Repo Auditor - Devin Automation</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --yellow: #d29922;
+      --purple: #bc8cff;
+      --orange: #f0883e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 2rem;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    .subtitle { color: var(--muted); margin-bottom: 1.5rem; font-size: 0.9rem; }
+    .nav { margin-bottom: 1.5rem; }
+    .nav a { color: var(--blue); text-decoration: none; font-size: 0.85rem; }
+    .nav a:hover { text-decoration: underline; }
+
+    .search-bar {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+      align-items: center;
+    }
+    .search-bar input {
+      flex: 1;
+      max-width: 500px;
+      padding: 0.65rem 1rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+    }
+    .search-bar input:focus {
+      border-color: var(--blue);
+    }
+    .search-bar button {
+      padding: 0.65rem 1.5rem;
+      background: var(--blue);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .search-bar button:hover { opacity: 0.85; }
+    .search-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Spinner */
+    .spinner-container {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      padding: 4rem 0;
+    }
+    .spinner-container.active { display: flex; }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner-text { color: var(--muted); margin-top: 1rem; font-size: 0.9rem; }
+
+    /* Results */
+    #results { display: none; }
+    #results.active { display: block; }
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    .results-header h2 { font-size: 1.2rem; }
+    .results-count { color: var(--muted); font-size: 0.85rem; }
+
+    /* Issue cards */
+    .issue-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+      transition: border-color 0.15s;
+    }
+    .issue-card:hover { border-color: var(--muted); }
+    .issue-card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.55rem;
+      border-radius: 12px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+    .badge-security  { background: rgba(248,81,73,0.15); color: var(--red); }
+    .badge-quality   { background: rgba(210,153,34,0.15); color: var(--yellow); }
+    .badge-deps      { background: rgba(188,140,255,0.15); color: var(--purple); }
+    .badge-docs      { background: rgba(63,185,80,0.15); color: var(--green); }
+    .issue-title { font-weight: 600; font-size: 1rem; }
+    .issue-location {
+      color: var(--muted);
+      font-size: 0.8rem;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      margin-bottom: 0.5rem;
+    }
+    .issue-description {
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin-bottom: 1rem;
+    }
+    .btn-fix {
+      padding: 0.45rem 1rem;
+      background: transparent;
+      color: var(--orange);
+      border: 1px solid var(--orange);
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-fix:hover {
+      background: rgba(240,136,62,0.12);
+    }
+    .btn-fix:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .btn-fix.created {
+      color: var(--green);
+      border-color: var(--green);
+      cursor: default;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: var(--muted);
+    }
+    .error-msg {
+      background: rgba(248,81,73,0.1);
+      border: 1px solid var(--red);
+      color: var(--red);
+      padding: 1rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      display: none;
+    }
+    .error-msg.active { display: block; }
+  </style>
+</head>
+<body>
+  <div class="nav">
+    <a href="/dashboard">&larr; Back to Dashboard</a>
+  </div>
+  <h1>Repo Auditor</h1>
+  <p class="subtitle">Scan a GitHub repository for code quality issues, security concerns, and missing documentation.</p>
+
+  <div class="search-bar">
+    <input type="text" id="repoInput" value="ashleyot/superset" placeholder="owner/repo">
+    <button id="auditBtn" onclick="runAudit()">Audit</button>
+  </div>
+
+  <div class="error-msg" id="errorMsg"></div>
+
+  <div class="spinner-container" id="spinner">
+    <div class="spinner"></div>
+    <div class="spinner-text">Scanning repository...</div>
+  </div>
+
+  <div id="results">
+    <div class="results-header">
+      <h2>Findings</h2>
+      <span class="results-count" id="resultsCount"></span>
+    </div>
+    <div id="issueCards"></div>
+  </div>
+
+  <script>
+    const BADGE_MAP = {
+      'Security': 'badge-security',
+      'Code Quality': 'badge-quality',
+      'Deps': 'badge-deps',
+      'Docs': 'badge-docs'
+    };
+
+    async function runAudit() {
+      const repo = document.getElementById('repoInput').value.trim();
+      if (!repo) return;
+
+      const btn = document.getElementById('auditBtn');
+      const spinner = document.getElementById('spinner');
+      const results = document.getElementById('results');
+      const errorMsg = document.getElementById('errorMsg');
+
+      btn.disabled = true;
+      btn.textContent = 'Scanning...';
+      spinner.classList.add('active');
+      results.classList.remove('active');
+      errorMsg.classList.remove('active');
+
+      try {
+        const resp = await fetch(`/audit/run?repo=${encodeURIComponent(repo)}`);
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          throw new Error(data.error || 'Audit failed');
+        }
+
+        renderResults(data.findings, repo);
+      } catch (err) {
+        errorMsg.textContent = err.message;
+        errorMsg.classList.add('active');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Audit';
+        spinner.classList.remove('active');
+      }
+    }
+
+    function renderResults(findings, repo) {
+      const container = document.getElementById('issueCards');
+      const results = document.getElementById('results');
+      const count = document.getElementById('resultsCount');
+
+      container.innerHTML = '';
+      count.textContent = `${findings.length} issue${findings.length !== 1 ? 's' : ''} found`;
+
+      if (findings.length === 0) {
+        container.innerHTML = '<div class="empty-state">No issues found. This repo looks clean!</div>';
+        results.classList.add('active');
+        return;
+      }
+
+      findings.forEach((f, idx) => {
+        const badgeClass = BADGE_MAP[f.type] || 'badge-quality';
+        const card = document.createElement('div');
+        card.className = 'issue-card';
+        card.innerHTML = `
+          <div class="issue-card-header">
+            <span class="badge ${badgeClass}">${f.type}</span>
+            <span class="issue-title">${escapeHtml(f.title)}</span>
+          </div>
+          <div class="issue-location">${escapeHtml(f.file)}${f.line ? ':' + f.line : ''}</div>
+          <div class="issue-description">${escapeHtml(f.description)}</div>
+          <button class="btn-fix" id="fix-btn-${idx}" onclick="createIssue(${idx}, '${escapeAttr(repo)}')">
+            Create Issue + Fix with Devin
+          </button>
+        `;
+        container.appendChild(card);
+      });
+
+      results.classList.add('active');
+      window._findings = findings;
+    }
+
+    async function createIssue(idx, repo) {
+      const finding = window._findings[idx];
+      const btn = document.getElementById(`fix-btn-${idx}`);
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+
+      try {
+        const resp = await fetch('/audit/create-issue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo, finding })
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          throw new Error(data.error || 'Failed to create issue');
+        }
+
+        btn.textContent = `Issue #${data.issue_number} created`;
+        btn.classList.add('created');
+      } catch (err) {
+        btn.textContent = 'Failed - retry';
+        btn.disabled = false;
+        alert(err.message);
+      }
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function escapeAttr(str) {
+      return str.replace(/'/g, "\\'").replace(/"/g, '\\"');
+    }
+  </script>
+</body>
+</html>

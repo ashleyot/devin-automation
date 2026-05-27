@@ -5,11 +5,13 @@ Listens for GitHub webhook events, triggers Devin sessions for issues
 labelled "devin-fix", polls for completion, and serves a live dashboard.
 """
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -296,6 +298,343 @@ def dashboard():
         failed=failed,
         success_rate=success_rate,
     )
+
+
+# ---------------------------------------------------------------------------
+# Repo Auditor
+# ---------------------------------------------------------------------------
+
+GH_API = "https://api.github.com"
+GH_HEADERS = {
+    "Accept": "application/vnd.github+json",
+}
+
+
+def _gh_headers() -> dict:
+    headers = dict(GH_HEADERS)
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
+
+
+def _gh_get(url: str, params: dict | None = None) -> requests.Response:
+    return requests.get(url, headers=_gh_headers(), params=params, timeout=20)
+
+
+def _gh_get_file(repo: str, path: str) -> str | None:
+    """Fetch a file's contents from GitHub. Returns decoded text or None."""
+    resp = _gh_get(f"{GH_API}/repos/{repo}/contents/{path}")
+    if resp.status_code != 200:
+        return None
+    data = resp.json()
+    if data.get("encoding") == "base64":
+        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+    return data.get("content")
+
+
+def _gh_search_code(repo: str, query: str) -> list[dict]:
+    """Search code in a repo via GitHub search API. Returns list of items."""
+    resp = _gh_get(
+        f"{GH_API}/search/code",
+        params={"q": f"{query} repo:{repo}", "per_page": 15},
+    )
+    if resp.status_code != 200:
+        return []
+    return resp.json().get("items", [])
+
+
+def _gh_tree(repo: str, path: str = "") -> list[dict]:
+    """List directory contents from GitHub."""
+    resp = _gh_get(f"{GH_API}/repos/{repo}/contents/{path}")
+    if resp.status_code != 200:
+        return []
+    data = resp.json()
+    return data if isinstance(data, list) else []
+
+
+def _gh_create_issue(repo: str, title: str, body: str, labels: list[str]) -> dict:
+    """Create a GitHub issue and return the response JSON."""
+    resp = requests.post(
+        f"{GH_API}/repos/{repo}/issues",
+        headers=_gh_headers(),
+        json={"title": title, "body": body, "labels": labels},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+# -- Scanners ----------------------------------------------------------------
+
+KNOWN_VULNERABLE = {
+    "pyyaml": {"below": "6.0", "cve": "CVE-2020-14343", "desc": "Arbitrary code execution via yaml.load()"},
+    "jinja2": {"below": "3.1.5", "cve": "CVE-2024-56326", "desc": "Sandbox escape vulnerability"},
+    "flask": {"below": "2.3.2", "cve": "CVE-2023-30861", "desc": "Session cookie security bypass"},
+    "werkzeug": {"below": "3.0.6", "cve": "CVE-2024-49767", "desc": "Potential denial of service"},
+    "certifi": {"below": "2023.7.22", "cve": "CVE-2023-37920", "desc": "Removal of e-Tugra root certificate"},
+    "cryptography": {"below": "41.0.6", "cve": "CVE-2023-49083", "desc": "NULL pointer dereference"},
+    "pillow": {"below": "10.0.1", "cve": "CVE-2023-44271", "desc": "Denial of service via large image"},
+    "requests": {"below": "2.32.0", "cve": "CVE-2024-35195", "desc": "Session credential leak on redirect"},
+    "sqlalchemy": {"below": "2.0.36", "cve": "CVE-2024-11986", "desc": "SQL injection in has_table()"},
+    "urllib3": {"below": "2.0.7", "cve": "CVE-2023-45803", "desc": "Request body leak on redirect"},
+    "setuptools": {"below": "70.0", "cve": "CVE-2024-6345", "desc": "Remote code execution via download"},
+}
+
+
+def _parse_version(ver_str: str) -> tuple:
+    """Parse a version string into a comparable tuple of ints."""
+    parts = re.split(r"[^0-9]+", ver_str.strip())
+    return tuple(int(p) for p in parts if p)
+
+
+def _version_below(installed: str, threshold: str) -> bool:
+    """Check if installed version is below threshold."""
+    try:
+        return _parse_version(installed) < _parse_version(threshold)
+    except (ValueError, IndexError):
+        return False
+
+
+def _scan_requirements(repo: str) -> list[dict]:
+    """Check requirements files for known vulnerable packages."""
+    findings = []
+    for req_path in ("requirements/base.txt", "requirements.txt"):
+        content = _gh_get_file(repo, req_path)
+        if not content:
+            continue
+        for line_num, line in enumerate(content.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("-"):
+                continue
+            match = re.match(r"([a-zA-Z0-9_-]+)\s*[=<>!~]+\s*([\d.]+)", line)
+            if not match:
+                continue
+            pkg = match.group(1).lower().replace("-", "").replace("_", "")
+            ver = match.group(2)
+            for known_pkg, info in KNOWN_VULNERABLE.items():
+                norm = known_pkg.replace("-", "").replace("_", "")
+                if pkg == norm and _version_below(ver, info["below"]):
+                    findings.append({
+                        "type": "Security",
+                        "title": f"{match.group(1)}=={ver} has known vulnerability ({info['cve']})",
+                        "file": req_path,
+                        "line": line_num,
+                        "description": f"{info['desc']}. Upgrade to >= {info['below']}.",
+                    })
+    return findings
+
+
+def _scan_package_json(repo: str) -> list[dict]:
+    """Check package.json for deprecated or outdated dependencies."""
+    findings = []
+    content = _gh_get_file(repo, "package.json")
+    if not content:
+        content = _gh_get_file(repo, "superset-frontend/package.json")
+    if not content:
+        return findings
+    try:
+        pkg = json.loads(content)
+    except json.JSONDecodeError:
+        return findings
+
+    deprecated_pkgs = {
+        "request": "The 'request' package is deprecated. Use 'node-fetch' or 'axios'.",
+        "querystring": "Built into Node.js; the npm package is deprecated.",
+        "uuid": None,
+        "tslint": "TSLint is deprecated. Migrate to ESLint with @typescript-eslint.",
+        "enzyme": "Enzyme is deprecated. Use React Testing Library.",
+        "moment": "moment.js is in maintenance mode. Consider day.js or date-fns.",
+    }
+
+    all_deps = {}
+    for section in ("dependencies", "devDependencies"):
+        all_deps.update(pkg.get(section, {}))
+
+    for dep_name, dep_ver in all_deps.items():
+        if dep_name in deprecated_pkgs and deprecated_pkgs[dep_name]:
+            findings.append({
+                "type": "Deps",
+                "title": f"Deprecated dependency: {dep_name}",
+                "file": "package.json",
+                "line": None,
+                "description": deprecated_pkgs[dep_name],
+            })
+    return findings
+
+
+def _scan_console_logs(repo: str) -> list[dict]:
+    """Search for console.log statements in frontend src files."""
+    findings = []
+    items = _gh_search_code(repo, "console.log path:src extension:ts extension:tsx extension:js")
+    for item in items[:10]:
+        file_path = item.get("path", "")
+        if "/test" in file_path or "/__test" in file_path or ".test." in file_path or ".spec." in file_path:
+            continue
+        content = _gh_get_file(repo, file_path)
+        if not content:
+            continue
+        for line_num, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            if "console.log(" in stripped and not stripped.startswith("//") and not stripped.startswith("*"):
+                findings.append({
+                    "type": "Code Quality",
+                    "title": f"console.log statement in production code",
+                    "file": file_path,
+                    "line": line_num,
+                    "description": f"Remove or replace with a proper logging mechanism: {stripped[:120]}",
+                })
+                break
+    return findings
+
+
+def _scan_python_docstrings(repo: str) -> list[dict]:
+    """Check for Python functions missing docstrings in utils folders."""
+    findings = []
+    utils_dirs = ["utils", "superset/utils"]
+    for utils_dir in utils_dirs:
+        entries = _gh_tree(repo, utils_dir)
+        for entry in entries:
+            if entry.get("type") != "file" or not entry["name"].endswith(".py"):
+                continue
+            if entry["name"].startswith("_"):
+                continue
+            file_path = entry.get("path", f"{utils_dir}/{entry['name']}")
+            content = _gh_get_file(repo, file_path)
+            if not content:
+                continue
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                match = re.match(r"^def ([a-zA-Z][a-zA-Z0-9_]*)\s*\(", line)
+                if not match:
+                    continue
+                func_name = match.group(1)
+                if func_name.startswith("_"):
+                    continue
+                next_nonblank = ""
+                for j in range(i + 1, min(i + 10, len(lines))):
+                    stripped = lines[j].strip()
+                    if stripped and not stripped.startswith(")") and stripped not in (")", "):"):
+                        next_nonblank = stripped
+                        break
+                if not (next_nonblank.startswith('"""') or next_nonblank.startswith("'''")):
+                    findings.append({
+                        "type": "Docs",
+                        "title": f"Function `{func_name}()` missing docstring",
+                        "file": file_path,
+                        "line": i + 1,
+                        "description": f"Public function `{func_name}` lacks a docstring. Add one describing its purpose, arguments, and return value.",
+                    })
+            if len(findings) > 30:
+                break
+        if len(findings) > 30:
+            break
+    return findings[:20]
+
+
+def _scan_ts_return_types(repo: str) -> list[dict]:
+    """Check for TypeScript functions missing return types in utils folders."""
+    findings = []
+    ts_utils_dirs = ["src/utils", "superset-frontend/src/utils"]
+    for utils_dir in ts_utils_dirs:
+        entries = _gh_tree(repo, utils_dir)
+        for entry in entries:
+            if entry.get("type") != "file":
+                continue
+            name = entry["name"]
+            if not (name.endswith(".ts") or name.endswith(".tsx")):
+                continue
+            if name.endswith(".test.ts") or name.endswith(".test.tsx"):
+                continue
+            file_path = entry.get("path", f"{utils_dir}/{name}")
+            content = _gh_get_file(repo, file_path)
+            if not content:
+                continue
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                match = re.match(
+                    r"^export\s+(?:async\s+)?function\s+([a-zA-Z][a-zA-Z0-9_]*)\s*"
+                    r"(?:<[^>]*>)?\s*\([^)]*\)\s*\{",
+                    line,
+                )
+                if match:
+                    func_name = match.group(1)
+                    if "): " not in line and "):" not in line.split("{")[0]:
+                        findings.append({
+                            "type": "Code Quality",
+                            "title": f"Function `{func_name}()` missing return type",
+                            "file": file_path,
+                            "line": i + 1,
+                            "description": f"Exported function `{func_name}` lacks an explicit return type annotation. Add a return type for better type safety.",
+                        })
+            if len(findings) > 20:
+                break
+        if len(findings) > 20:
+            break
+    return findings[:15]
+
+
+@app.route("/audit", methods=["GET"])
+def audit_page():
+    return render_template("audit.html")
+
+
+@app.route("/audit/run", methods=["GET"])
+def audit_run():
+    repo = request.args.get("repo", "").strip()
+    if not repo or "/" not in repo:
+        return jsonify({"error": "Invalid repo. Use format: owner/repo"}), 400
+
+    # Verify repo exists
+    resp = _gh_get(f"{GH_API}/repos/{repo}")
+    if resp.status_code == 404:
+        return jsonify({"error": f"Repository '{repo}' not found"}), 404
+    if resp.status_code != 200:
+        return jsonify({"error": f"GitHub API error: {resp.status_code}"}), 502
+
+    findings = []
+    findings.extend(_scan_requirements(repo))
+    findings.extend(_scan_package_json(repo))
+    findings.extend(_scan_console_logs(repo))
+    findings.extend(_scan_python_docstrings(repo))
+    findings.extend(_scan_ts_return_types(repo))
+
+    return jsonify({"repo": repo, "findings": findings, "scanned_at": datetime.now(timezone.utc).isoformat()})
+
+
+@app.route("/audit/create-issue", methods=["POST"])
+def audit_create_issue():
+    data = request.get_json(force=True)
+    repo = data.get("repo", "")
+    finding = data.get("finding", {})
+
+    if not repo or not finding:
+        return jsonify({"error": "Missing repo or finding"}), 400
+    if not GITHUB_TOKEN:
+        return jsonify({"error": "GITHUB_TOKEN not configured"}), 500
+
+    title = f"[{finding.get('type', 'Audit')}] {finding.get('title', 'Audit finding')}"
+    file_ref = finding.get("file", "")
+    line_ref = finding.get("line")
+    location = f"`{file_ref}`" + (f" (line {line_ref})" if line_ref else "")
+
+    body = (
+        f"## Issue found by Repo Auditor\n\n"
+        f"**Type:** {finding.get('type', 'Unknown')}\n\n"
+        f"**Location:** {location}\n\n"
+        f"**Description:**\n{finding.get('description', '')}\n\n"
+        f"---\n"
+        f"*This issue was automatically created by the Repo Auditor.*"
+    )
+
+    try:
+        result = _gh_create_issue(repo, title, body, ["devin-fix"])
+        return jsonify({
+            "issue_number": result["number"],
+            "issue_url": result["html_url"],
+        })
+    except Exception as exc:
+        logger.exception("Failed to create issue on %s", repo)
+        return jsonify({"error": str(exc)}), 500
 
 
 if __name__ == "__main__":
