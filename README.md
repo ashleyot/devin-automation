@@ -75,6 +75,9 @@ GitHub Issue            Automation Server            Devin API
 | `GET` | `/` | Health check |
 | `POST` | `/webhook` | GitHub webhook receiver |
 | `GET` | `/dashboard` | Live dashboard UI |
+| `GET` | `/audit` | Repo Auditor page |
+| `GET` | `/audit/run?repo=owner/repo` | Run audit scan (returns JSON) |
+| `POST` | `/audit/create-issue` | Create GitHub issue from finding |
 
 ## Dashboard
 
@@ -86,13 +89,25 @@ Visit `http://localhost:5050/dashboard` to see:
 
 The page auto-refreshes every 15 seconds.
 
+## Repo Auditor
+
+Visit `http://localhost:5050/audit` to scan any GitHub repository for issues:
+
+- **Security** — pinned packages with known vulnerabilities in `requirements.txt`
+- **Deps** — deprecated or outdated npm packages in `package.json`
+- **Code Quality** — `console.log` statements in source files, missing return types
+- **Docs** — Python functions missing docstrings in utils folders
+
+Each finding can be turned into a GitHub issue with the **devin-fix** label via the "Create Issue + Fix with Devin" button.
+
 ## Project Structure
 
 ```
 devin-automation/
 ├── app.py                 # Flask application
 ├── templates/
-│   └── dashboard.html     # Dashboard template
+│   ├── dashboard.html     # Dashboard template
+│   └── audit.html         # Repo Auditor page
 ├── requirements.txt       # Python dependencies
 ├── Dockerfile             # Container image
 ├── docker-compose.yml     # Compose configuration
