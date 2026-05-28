@@ -20,6 +20,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 
@@ -99,7 +101,7 @@ def _comment_on_issue(repo_full_name: str, issue_number: int, body: str) -> None
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
     }
-    resp = requests.post(url, json={"body": body}, headers=headers, timeout=15)
+    resp = requests.post(url, json={"body": body}, headers=headers, timeout=30)
     resp.raise_for_status()
     logger.info("Commented on %s#%s", repo_full_name, issue_number)
 
@@ -109,16 +111,30 @@ def _comment_on_issue(repo_full_name: str, issue_number: int, body: str) -> None
 # ---------------------------------------------------------------------------
 
 
+def _retry_session() -> requests.Session:
+    """Return a requests Session with automatic retries and backoff."""
+    s = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[502, 503, 504],
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    return s
+
+
 def _create_devin_session(prompt: str) -> dict:
     headers = {
         "Authorization": f"Bearer {DEVIN_API_KEY}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(
+    s = _retry_session()
+    resp = s.post(
         f"{DEVIN_API_BASE}/sessions",
         json={"prompt": prompt},
         headers=headers,
-        timeout=30,
+        timeout=60,
     )
     resp.raise_for_status()
     return resp.json()
@@ -126,10 +142,11 @@ def _create_devin_session(prompt: str) -> dict:
 
 def _get_session_status(session_id: str) -> dict:
     headers = {"Authorization": f"Bearer {DEVIN_API_KEY}"}
-    resp = requests.get(
+    s = _retry_session()
+    resp = s.get(
         f"{DEVIN_API_BASE}/session/{session_id}",
         headers=headers,
-        timeout=15,
+        timeout=60,
     )
     resp.raise_for_status()
     return resp.json()
@@ -318,7 +335,7 @@ def _gh_headers() -> dict:
 
 
 def _gh_get(url: str, params: dict | None = None) -> requests.Response:
-    return requests.get(url, headers=_gh_headers(), params=params, timeout=20)
+    return requests.get(url, headers=_gh_headers(), params=params, timeout=30)
 
 
 def _gh_get_file(repo: str, path: str) -> str | None:
@@ -358,7 +375,7 @@ def _gh_create_issue(repo: str, title: str, body: str, labels: list[str]) -> dic
         f"{GH_API}/repos/{repo}/issues",
         headers=_gh_headers(),
         json={"title": title, "body": body, "labels": labels},
-        timeout=15,
+        timeout=30,
     )
     resp.raise_for_status()
     return resp.json()
